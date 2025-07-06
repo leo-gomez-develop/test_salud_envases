@@ -10,10 +10,34 @@
     <!-- Enlace a tu archivo CSS personalizado -->
     <link rel="stylesheet" href="style.css">
     
-    <!-- Firebase SDKs (Compat versions for global access) -->
-    <script src="https://www.gstatic.com/firebasejs/11.6.1/firebase-app-compat.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/11.6.1/firebase-auth-compat.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore-compat.js"></script>
+    <!-- Firebase SDKs (solo para autenticación anónima inicial requerida por el entorno) -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        
+        // Define the Firebase configuration and app ID (provided by the environment)
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        // Initialize Firebase and sign in anonymously
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+
+        onAuthStateChanged(auth, async (user) => {
+            if (!user) {
+                try {
+                    if (initialAuthToken) {
+                        await signInWithCustomToken(auth, initialAuthToken);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+                    console.log("Firebase Auth: User signed in anonymously.");
+                } catch (error) {
+                    console.error("Firebase Auth: Error during anonymous sign-in:", error);
+                }
+            }
+        });
+    </script>
 </head>
 <body class="flex items-center justify-center min-h-screen p-4">
     <!-- Message Box -->
@@ -44,7 +68,6 @@
             <select
                 id="user-select"
                 class="block w-full px-4 py-3 rounded-lg border-2 border-gray-300 focus:border-[var(--color-primary)] focus:ring-[var(--color-primary)] bg-gray-50 text-gray-800 text-lg shadow-sm"
-                disabled
             >
                 <option value="">-- Selecciona un participante --</option>
                 <!-- Las opciones serán pobladas por JS -->

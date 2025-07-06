@@ -1,11 +1,6 @@
-// Global variables for Firebase instances and app state
-let app;
-let db;
-let auth;
-let userId = null;
+// Global variables for app state
 let userName = '';
 let leaderboard = [];
-let isAuthReady = false;
 let messageTimeoutRef = null;
 let selectedActivity = '';
 let selectedDuration = 0;
@@ -14,10 +9,10 @@ let currentUserNameTotalSteps = 0;
 let currentUserNameTotalCalories = 0;
 let uploadedImageBase64 = null; // To store the screenshot
 
-// Define the Firebase configuration and app ID (provided by the environment)
-const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+// --- CONFIGURACIÓN IMPORTANTE ---
+// Reemplaza esta URL con la URL de tu Google Apps Script Web App desplegada.
+// Esta URL será tu "API" para interactuar con Google Sheets.
+const GOOGLE_APPS_SCRIPT_WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbzIuQ8QTG1YIrnYjM29FprrHg_vmDqBAOzYaiXQRyq8FNVUVT2Uyb9q4Mpu4PZzxRYp/exec';
 
 // Helper to format date as YYYY-MM-DD
 const getTodayDateString = () => {
@@ -48,8 +43,8 @@ const updateUI = () => {
     document.getElementById('total-steps').textContent = currentUserNameTotalSteps;
     document.getElementById('total-calories').textContent = currentUserNameTotalCalories;
 
-    // Enable/disable user select dropdown based on auth readiness
-    document.getElementById('user-select').disabled = !userId;
+    // The user select dropdown is enabled by default now, as it doesn't depend on Firebase auth
+    // document.getElementById('user-select').disabled = !userId; // REMOVED: No longer depends on Firebase userId
 
     // Update submit button state
     const submitButton = document.getElementById('submit-button');
@@ -104,43 +99,36 @@ const updateUI = () => {
 // Calculate current user's position (global scope for updateUI)
 let currentUserPosition = 0;
 
-// Firebase Authentication and Firestore setup
-const setupFirebase = async () => {
+// Function to fetch participants from Google Sheet via GAS
+const fetchParticipants = async () => {
     try {
-        // Access Firebase objects via the global 'firebase' namespace
-        app = firebase.initializeApp(firebaseConfig); 
-        db = firebase.firestore(); // Use firebase.firestore() directly
-        auth = firebase.auth(); // Use firebase.auth() directly
+        const response = await fetch(`${GOOGLE_APPS_SCRIPT_WEB_APP_URL}?action=getParticipants`);
+        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+        const data = await response.json();
+        
+        // Sort alphabetically by name
+        const sortedParticipants = data.sort((a, b) => a.name.localeCompare(b.name));
 
-        firebase.auth().onAuthStateChanged(auth, async (user) => {
-            if (user) {
-                userId = user.uid;
-                isAuthReady = true;
-                console.log("User authenticated:", userId);
-            } else {
-                userId = null;
-                isAuthReady = true;
-                console.log("No user authenticated, signing in anonymously.");
-                await firebase.auth().signInAnonymously();
-            }
-            updateUI(); // This should update the disabled state of user-select
+        const userSelect = document.getElementById('user-select');
+        userSelect.innerHTML = '<option value="">-- Selecciona un participante --</option>'; // Clear and add default
+        sortedParticipants.forEach(user => {
+            const option = document.createElement('option');
+            option.value = user.name;
+            option.textContent = user.name;
+            userSelect.appendChild(option);
         });
-
-        if (initialAuthToken) {
-            await firebase.auth().signInWithCustomToken(initialAuthToken);
-        } else {
-            await firebase.auth().signInAnonymously();
-        }
-
+        userSelect.disabled = false; // Enable the dropdown after loading
+        console.log("Participants loaded:", sortedParticipants);
     } catch (error) {
-        console.error("Error during Firebase initialization or authentication:", error);
-        showMessage("Error al iniciar la aplicación. Inténtalo de nuevo.");
+        console.error("Error fetching participants:", error);
+        showMessage("Error al cargar la lista de participantes.");
+        document.getElementById('user-select').disabled = true; // Keep disabled on error
     }
 };
 
-// Load data for the selected userName and check daily submission status
+// Load data for the selected userName from Google Sheet via GAS
 const loadUserNameData = async () => {
-    if (!isAuthReady || !userName) {
+    if (!userName) {
         currentUserNameTotalSteps = 0;
         currentUserNameTotalCalories = 0;
         hasSubmittedToday = false;
@@ -149,29 +137,17 @@ const loadUserNameData = async () => {
     }
 
     try {
-        const userLeaderboardDocRef = db.collection(`artifacts/${appId}/public/data/leaderboardUsers`).doc(userName);
-        const userLeaderboardSnap = await userLeaderboardDocRef.get();
+        const response = await fetch(`${GOOGLE_APPS_SCRIPT_WEB_APP_URL}?action=getUserData&userName=${encodeURIComponent(userName)}`);
+        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+        const userData = await response.json();
 
-        if (userLeaderboardSnap.exists) {
-            const userData = userLeaderboardSnap.data();
-            currentUserNameTotalSteps = userData.totalSteps || 0;
-            currentUserNameTotalCalories = userData.totalCalories || 0;
+        currentUserNameTotalSteps = userData.totalSteps || 0;
+        currentUserNameTotalCalories = userData.totalCalories || 0;
 
-            const lastSubmissionDateForThisUserName = userData.lastSubmissionDate;
-            if (lastSubmissionDateForThisUserName && lastSubmissionDateForThisUserName === getTodayDateString()) {
-                hasSubmittedToday = true;
-            } else {
-                hasSubmittedToday = false;
-            }
+        const lastSubmissionDateForThisUserName = userData.lastSubmissionDate;
+        if (lastSubmissionDateForThisUserName && lastSubmissionDateForThisUserName === getTodayDateString()) {
+            hasSubmittedToday = true;
         } else {
-            await userLeaderboardDocRef.set({
-                userName: userName,
-                totalSteps: 0,
-                totalCalories: 0,
-                lastSubmissionDate: '',
-            });
-            currentUserNameTotalSteps = 0;
-            currentUserNameTotalCalories = 0;
             hasSubmittedToday = false;
         }
     } catch (error) {
@@ -182,38 +158,32 @@ const loadUserNameData = async () => {
     }
 };
 
-// Real-time leaderboard updates
-const setupLeaderboardListener = () => {
-    if (!isAuthReady) return;
-
-    const leaderboardCollectionRef = db.collection(`artifacts/${appId}/public/data/leaderboardUsers`);
-
-    leaderboardCollectionRef.onSnapshot((snapshot) => {
-        const usersData = [];
-        snapshot.forEach((doc) => {
-            const data = doc.data();
-            if (data.userName && data.totalSteps !== undefined && data.totalCalories !== undefined) {
-                usersData.push({ id: doc.id, ...data });
-            }
-        });
-        // Sort by totalSteps in descending order
-        usersData.sort((a, b) => b.totalSteps - a.totalSteps);
-        leaderboard = usersData;
+// Fetch leaderboard updates from Google Sheet via GAS
+const fetchLeaderboard = async () => {
+    try {
+        const response = await fetch(`${GOOGLE_APPS_SCRIPT_WEB_APP_URL}?action=getLeaderboard`);
+        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+        const data = await response.json();
+        
+        // Data is already sorted by GAS, but re-sort just in case
+        data.sort((a, b) => b.totalSteps - a.totalSteps);
+        leaderboard = data;
         console.log("Leaderboard updated:", leaderboard);
 
         // Update current user's displayed steps/calories if their name is selected
-        const currentUserEntry = usersData.find(user => user.userName === userName);
+        const currentUserEntry = leaderboard.find(user => user.userName === userName);
         if (currentUserEntry) {
             currentUserNameTotalSteps = currentUserEntry.totalSteps;
             currentUserNameTotalCalories = currentUserEntry.totalCalories;
         }
 
         currentUserPosition = leaderboard.findIndex(user => user.userName === userName) + 1;
-        updateUI();
-    }, (error) => {
+    } catch (error) {
         console.error("Error fetching leaderboard:", error);
         showMessage("Error al cargar el tablero de clasificación.");
-    });
+    } finally {
+        updateUI();
+    }
 };
 
 // Handle user name selection
@@ -238,7 +208,6 @@ const handleDurationChange = (duration) => {
 
 // Handle manual steps input
 const handleManualStepsChange = (event) => {
-    // No state needed for this, it's read directly on submission
     updateUI(); // To update button disabled state
 };
 
@@ -301,48 +270,51 @@ const handleDailySubmission = async () => {
     const { totalCalculatedSteps, totalCalculatedCalories } = calculateActivityData(manualSteps);
 
     try {
-        // Save daily activity to private subcollection
-        const dailySubmissionDocRef = db.collection(`artifacts/${appId}/users/${userId}/dailySubmissions`).doc(todayDate);
-        await dailySubmissionDocRef.set({
-            steps: totalCalculatedSteps,
-            calories: totalCalculatedCalories,
-            activity: selectedActivity,
-            duration: selectedDuration,
-            screenshot: uploadedImageBase64, // Store Base64 image
-            timestamp: new Date().toISOString(),
-            submittedByUserId: userId,
-            submittedByUserName: userName,
+        const response = await fetch(`${GOOGLE_APPS_SCRIPT_WEB_APP_URL}?action=submitActivity`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded', // Required for GAS doPost
+            },
+            body: JSON.stringify({ // Send as JSON string in body
+                userName: userName,
+                steps: totalCalculatedSteps,
+                calories: totalCalculatedCalories,
+                activity: selectedActivity,
+                duration: selectedDuration,
+                screenshot: uploadedImageBase64,
+                todayDate: todayDate,
+            }),
         });
-        console.log(`Daily submission for ${userName} by Firebase user ${userId} saved.`);
 
-        // Update public leaderboard data (keyed by userName)
-        const userLeaderboardDocRef = db.collection(`artifacts/${appId}/public/data/leaderboardUsers`).doc(userName);
-        await userLeaderboardDocRef.set({
-            userName: userName,
-            totalSteps: currentUserNameTotalSteps + totalCalculatedSteps,
-            totalCalories: currentUserNameTotalCalories + totalCalculatedCalories,
-            lastSubmissionDate: todayDate,
-        }, { merge: true });
-        console.log(`Leaderboard data for ${userName} updated.`);
+        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+        const result = await response.json();
 
-        currentUserNameTotalSteps += totalCalculatedSteps;
-        currentUserNameTotalCalories += totalCalculatedCalories;
-        hasSubmittedToday = true;
+        if (result.success) {
+            currentUserNameTotalSteps += totalCalculatedSteps;
+            currentUserNameTotalCalories += totalCalculatedCalories;
+            hasSubmittedToday = true;
 
-        showMessage("¡Actividad diaria registrada exitosamente! ¡Sigue así, campeón!");
-        document.getElementById('submit-button').classList.add('pulse-on-submit');
-        setTimeout(() => {
-            document.getElementById('submit-button').classList.remove('pulse-on-submit');
-        }, 500);
+            showMessage("¡Actividad diaria registrada exitosamente! ¡Sigue así, campeón!");
+            document.getElementById('submit-button').classList.add('pulse-on-submit');
+            setTimeout(() => {
+                document.getElementById('submit-button').classList.remove('pulse-on-submit');
+            }, 500);
 
-        // Reset form fields after successful submission (optional)
-        selectedActivity = '';
-        selectedDuration = 0;
-        document.getElementById('manual-steps').value = '';
-        uploadedImageBase64 = null;
-        document.getElementById('screenshot-input').value = ''; // Clear file input
-        document.getElementById('screenshot-preview').classList.add('hidden');
-        document.getElementById('screenshot-preview').src = '';
+            // Reset form fields after successful submission
+            selectedActivity = '';
+            selectedDuration = 0;
+            document.getElementById('manual-steps').value = '';
+            uploadedImageBase64 = null;
+            document.getElementById('screenshot-input').value = ''; // Clear file input
+            document.getElementById('screenshot-preview').classList.add('hidden');
+            document.getElementById('screenshot-preview').src = '';
+
+            // Re-fetch leaderboard to update totals for all
+            fetchLeaderboard();
+
+        } else {
+            showMessage(`Error al registrar: ${result.message || 'Desconocido'}`);
+        }
 
     } catch (error) {
         console.error("Error saving daily submission:", error);
@@ -352,35 +324,14 @@ const handleDailySubmission = async () => {
     }
 };
 
-// Data for dropdowns (sorted here for convenience)
-const simulatedUsers = [
-    { id: 'user1', name: 'Ana García' },
-    { id: 'user2', name: 'Carlos Ruiz' },
-    { id: 'user3', name: 'Diego Sánchez' },
-    { id: 'user4', name: 'Elena Ramírez' },
-    { id: 'user5', name: 'Javier Fernández' },
-    { id: 'user6', name: 'Laura González' },
-    { id: 'user7', name: 'Luis Pérez' },
-    { id: 'user8', name: 'María López' },
-    { id: 'user9', name: 'Pablo Torres' },
-    { id: 'user10', name: 'Sofía Martínez' },
-].sort((a, b) => a.name.localeCompare(b.name)); // Sort alphabetically by name
-
+// Data for activities (sorted here for convenience)
 const commonActivities = [
     'Caminar', 'Correr', 'Ciclismo', 'Nadar', 'Levantamiento de pesas', 'Fútbol', 'Baloncesto'
 ].sort((a, b) => a.localeCompare(b)); // Sort alphabetically
 
 // Initial setup on window load
-window.onload = () => {
-    // Populate dropdowns initially
-    const userSelect = document.getElementById('user-select');
-    simulatedUsers.forEach(user => {
-        const option = document.createElement('option');
-        option.value = user.name;
-        option.textContent = user.name;
-        userSelect.appendChild(option);
-    });
-
+window.onload = async () => {
+    // Populate activity dropdown
     const activitySelect = document.getElementById('activity-select');
     commonActivities.forEach(activity => {
         const option = document.createElement('option');
@@ -389,8 +340,10 @@ window.onload = () => {
         activitySelect.appendChild(option);
     });
 
-    setupFirebase();
-    setupLeaderboardListener(); // Start listening for leaderboard updates
+    // Fetch participants and leaderboard on load
+    await fetchParticipants();
+    await fetchLeaderboard();
+
     updateUI(); // Initial UI render
 
     // Attach event listeners
@@ -403,4 +356,7 @@ window.onload = () => {
     document.querySelectorAll('.btn-duration').forEach(btn => {
         btn.addEventListener('click', () => handleDurationChange(parseInt(btn.dataset.duration)));
     });
+
+    // Set up periodic leaderboard refresh (e.g., every 30 seconds)
+    setInterval(fetchLeaderboard, 30000);
 };
